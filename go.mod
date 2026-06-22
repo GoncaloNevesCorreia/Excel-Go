@@ -1,4 +1,4 @@
-module example.com/excel
+module github.com/GoncaloNevesCorreia/Excel-Go
 
 go 1.26.4
 
