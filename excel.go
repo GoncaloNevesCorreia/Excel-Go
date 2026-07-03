@@ -266,7 +266,7 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 			columnIndex, exists := headerIndex[columnName]
 
 			if !exists {
-				continue
+				return nil, fmt.Errorf("Missing '%s' column in file.", columnName)
 			}
 
 			if columnIndex >= len(row) {
