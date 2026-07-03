@@ -242,6 +242,8 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 
 	result := make([]T, 0, len(values)-1)
 
+	notFoundColumns := make([]string, 0)
+
 	for _, row := range values[1:] {
 		var item T
 
@@ -266,7 +268,9 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 			columnIndex, exists := headerIndex[columnName]
 
 			if !exists {
-				return nil, fmt.Errorf("Missing '%s' column in file.", columnName)
+				notFoundColumns = append(notFoundColumns, columnName)
+				continue
+				// return nil, fmt.Errorf("Missing '%s' column in file.", columnName)
 			}
 
 			if columnIndex >= len(row) {
@@ -381,6 +385,10 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 
 				}
 			}
+		}
+
+		if len(notFoundColumns) != 0 {
+			return nil, fmt.Errorf("Columns %v not found on the provided file.", notFoundColumns)
 		}
 
 		result = append(result, item)
