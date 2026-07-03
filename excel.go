@@ -1,8 +1,11 @@
 package excel
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"math/big"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -10,6 +13,40 @@ import (
 
 	"github.com/xuri/excelize/v2"
 )
+
+func Parse(blob string, filename string) ([]byte, error) {
+	fileData, err := base64.StdEncoding.DecodeString(blob)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 data: %v", err)
+	}
+
+	ext := filepath.Ext(filename)
+
+	if ext == ".xlsx" || ext == ".xlsm" {
+		return fileData, nil
+	} else {
+		return nil, fmt.Errorf("unsupported file type: %s", ext)
+	}
+}
+
+func ReadBytes[T any](data []byte, sheet string) ([]T, error) {
+	reader := bytes.NewReader(data)
+
+	f, err := excelize.OpenReader(reader)
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() {
+		if err := f.Close(); err != nil {
+			fmt.Println(err)
+		}
+	}()
+
+	return readSheet[T](f, sheet)
+}
 
 func ReadBook[T any](filePath string, sheet string) ([]T, error) {
 	f, err := excelize.OpenFile(filePath)
@@ -19,34 +56,12 @@ func ReadBook[T any](filePath string, sheet string) ([]T, error) {
 	}
 
 	defer func() {
-		// Close the spreadsheet.
 		if err := f.Close(); err != nil {
 			fmt.Println(err)
 		}
 	}()
 
-	// Get all the rows in the Sheet1.
-	rows, err := f.GetRows(sheet)
-
-	if err != nil {
-		return nil, err
-	}
-
-	maxSize := len(rows[0])
-
-	for i, row := range rows {
-		rowSize := len(row)
-
-		if rowSize >= maxSize {
-			continue
-		}
-
-		padding := make([]string, maxSize-rowSize)
-
-		rows[i] = append(rows[i], padding...)
-	}
-
-	return loadStruct[T](rows)
+	return readSheet[T](f, sheet)
 }
 
 func WriteBook[T any](file string, sheet string, items []T) {
@@ -75,6 +90,31 @@ func WriteBook[T any](file string, sheet string, items []T) {
 	if err := f.SaveAs(file); err != nil {
 		fmt.Println(err)
 	}
+}
+
+func readSheet[T any](f *excelize.File, sheet string) ([]T, error) {
+	// Get all the rows in the Sheet1.
+	rows, err := f.GetRows(sheet)
+
+	if err != nil {
+		return nil, err
+	}
+
+	maxSize := len(rows[0])
+
+	for i, row := range rows {
+		rowSize := len(row)
+
+		if rowSize >= maxSize {
+			continue
+		}
+
+		padding := make([]string, maxSize-rowSize)
+
+		rows[i] = append(rows[i], padding...)
+	}
+
+	return loadStruct[T](rows)
 }
 
 func getColumns[T any]() ([]string, []any, error) {
