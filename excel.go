@@ -14,29 +14,58 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-func Parse(blob string, filename string) ([]byte, error) {
+type Result[T any] struct {
+	Success bool
+	Data    []T
+	Error   *FileError
+}
+
+type FileError struct {
+	Code    string
+	Message string
+}
+
+func Parse(blob string, filename string) Result[byte] {
 	fileData, err := base64.StdEncoding.DecodeString(blob)
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode base64 data: %v", err)
+		return Result[byte]{
+			Error: &FileError{
+				Code:    "invalid_file_base64",
+				Message: err.Error(),
+			},
+		}
 	}
 
 	ext := filepath.Ext(filename)
 
-	if ext == ".xlsx" || ext == ".xlsm" {
-		return fileData, nil
-	} else {
-		return nil, fmt.Errorf("unsupported file type: %s", ext)
+	if ext != ".xlsx" && ext != ".xlsm" {
+		return Result[byte]{
+			Error: &FileError{
+				Code:    "invalid_file_format",
+				Message: fmt.Sprintf("Extensão não suportada: %s", ext),
+			},
+		}
+	}
+
+	return Result[byte]{
+		Success: true,
+		Data:    fileData,
 	}
 }
 
-func ReadBytes[T any](data []byte, sheet string) ([]T, error) {
+func ReadBytes[T any](data []byte, sheet string) Result[T] {
 	reader := bytes.NewReader(data)
 
 	f, err := excelize.OpenReader(reader)
 
 	if err != nil {
-		return nil, err
+		return Result[T]{
+			Error: &FileError{
+				Code:    "failed_open_reader",
+				Message: err.Error(),
+			},
+		}
 	}
 
 	defer func() {
@@ -48,11 +77,16 @@ func ReadBytes[T any](data []byte, sheet string) ([]T, error) {
 	return readSheet[T](f, sheet)
 }
 
-func ReadBook[T any](filePath string, sheet string) ([]T, error) {
+func ReadBook[T any](filePath string, sheet string) Result[T] {
 	f, err := excelize.OpenFile(filePath)
 
 	if err != nil {
-		return nil, err
+		return Result[T]{
+			Error: &FileError{
+				Code:    "failed_open_file",
+				Message: err.Error(),
+			},
+		}
 	}
 
 	defer func() {
@@ -64,7 +98,7 @@ func ReadBook[T any](filePath string, sheet string) ([]T, error) {
 	return readSheet[T](f, sheet)
 }
 
-func WriteBook[T any](file string, sheet string, items []T) {
+func WriteBook[T any](file string, sheet string, items []T) Result[T] {
 
 	f := excelize.NewFile()
 
@@ -80,24 +114,36 @@ func WriteBook[T any](file string, sheet string, items []T) {
 		panic(err)
 	}
 
-	err = saveStruct(f, sw, items)
+	response := saveStruct(f, sw, items)
 
-	if err != nil {
-		panic(err)
+	if !response.Success {
+		return response
 	}
 
 	// Save spreadsheet by the given path.
 	if err := f.SaveAs(file); err != nil {
-		fmt.Println(err)
+		return Result[T]{
+			Error: &FileError{
+				Code:    "failed_write_file",
+				Message: err.Error(),
+			},
+		}
 	}
+
+	return response
 }
 
-func readSheet[T any](f *excelize.File, sheet string) ([]T, error) {
+func readSheet[T any](f *excelize.File, sheet string) Result[T] {
 	// Get all the rows in the Sheet1.
 	rows, err := f.GetRows(sheet)
 
 	if err != nil {
-		return nil, err
+		return Result[T]{
+			Error: &FileError{
+				Code:    "failed_read_sheet",
+				Message: err.Error(),
+			},
+		}
 	}
 
 	maxSize := len(rows[0])
@@ -117,11 +163,11 @@ func readSheet[T any](f *excelize.File, sheet string) ([]T, error) {
 	return loadStruct[T](rows)
 }
 
-func getColumns[T any]() ([]string, []any, error) {
+func getColumns[T any]() ([]string, []any) {
 	t := reflect.TypeFor[T]()
 
 	if t.Kind() != reflect.Struct {
-		return nil, nil, fmt.Errorf("%s must be a struct", t.Name())
+		panic(fmt.Errorf("%s must be a struct", t.Name()))
 	}
 
 	keys := []string{}
@@ -144,32 +190,36 @@ func getColumns[T any]() ([]string, []any, error) {
 	}
 
 	if len(columns) == 0 {
-		return nil, nil, fmt.Errorf("No Columns found in struct '%s'. Please include the missing json tags", t.Name())
+		panic(fmt.Errorf("No Columns found in struct '%s'. Please include the missing json tags", t.Name()))
 	}
 
-	return keys, columns, nil
+	return keys, columns
 }
 
-func saveStruct[T any](f *excelize.File, sw *excelize.StreamWriter, items []T) error {
+func saveStruct[T any](f *excelize.File, sw *excelize.StreamWriter, items []T) Result[T] {
 
 	if reflect.TypeFor[T]().Kind() != reflect.Struct {
-		return fmt.Errorf("T must be a struct")
+		panic(fmt.Errorf("T must be a struct"))
 	}
 
-	keys, columns, err := getColumns[T]()
-
-	if err != nil {
-		return err
-	}
+	keys, columns := getColumns[T]()
 
 	cell := "A" + strconv.Itoa(1)
 
 	if err := sw.SetRow(cell, columns); err != nil {
-		return err
+
+		return Result[T]{
+			Error: &FileError{
+				Code:    "failed_write_file",
+				Message: err.Error(),
+			},
+		}
 	}
 
 	if len(items) == 0 {
-		return nil
+		return Result[T]{
+			Success: true,
+		}
 	}
 
 	size := len(columns)
@@ -193,37 +243,59 @@ func saveStruct[T any](f *excelize.File, sw *excelize.StreamWriter, items []T) e
 				duraration, err := durationCell(f, fieldValue.Interface().(time.Duration))
 
 				if err != nil {
-					return fmt.Errorf("Cannot Convert value '%v' of column %s to time.Duration.", fieldValue, columns[j])
+					return Result[T]{
+						Error: &FileError{
+							Code:    "parse_error",
+							Message: fmt.Sprintf("Não foi possivel converter o valor '%v' da coluna '%s' para um time.Duration.", fieldValue, columns[j]),
+						},
+					}
 				}
 
 				row[j] = duraration
-				// row[j] = formatHHMMSS(fieldValue.Interface().(time.Duration))
 
 				continue
 			}
 
 			row[j] = fieldValue.Interface()
-
 		}
 
 		cell = "A" + strconv.Itoa(i+2)
 
 		if err := sw.SetRow(cell, row); err != nil {
-			return err
+			return Result[T]{
+				Error: &FileError{
+					Code:    "failed_write_file",
+					Message: err.Error(),
+				},
+			}
 		}
 	}
 
-	return sw.Flush()
+	if err := sw.Flush(); err != nil {
+		return Result[T]{
+			Error: &FileError{
+				Code:    "failed_write_file",
+				Message: err.Error(),
+			},
+		}
+	}
+
+	return Result[T]{
+		Success: true,
+	}
 }
 
-func loadStruct[T any](values [][]string) ([]T, error) {
+func loadStruct[T any](values [][]string) Result[T] {
 
 	if reflect.TypeFor[T]().Kind() != reflect.Struct {
-		return nil, fmt.Errorf("T must be a struct")
+		panic(fmt.Errorf("T must be a struct"))
 	}
 
 	if len(values) == 0 {
-		return []T{}, nil
+		return Result[T]{
+			Success: true,
+			Data:    []T{},
+		}
 	}
 
 	headers := values[0]
@@ -270,7 +342,6 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 			if !exists {
 				notFoundColumns = append(notFoundColumns, columnName)
 				continue
-				// return nil, fmt.Errorf("Missing '%s' column in file.", columnName)
 			}
 
 			if columnIndex >= len(row) {
@@ -281,12 +352,19 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 
 			valueType := valueField.Type()
 
+			// TODO: Adicionar converção automatica de strings no excel para:
+			// DD/MM/YYYY or DD/MM/YYYY hh:mm:ss
 			if isTime(valueType) {
 				// TODO: NOT WORKING
 				parsedTime, err := time.Parse("02:09:00", value)
 
 				if err != nil {
-					return nil, fmt.Errorf("Cannot Convert value '%v' of column %s to time.Time.", value, columnName)
+					return Result[T]{
+						Error: &FileError{
+							Code:    "parse_error",
+							Message: fmt.Sprintf("Não foi possivel converter o valor '%v' da coluna '%s' para um time.Time.", value, columnName),
+						},
+					}
 				}
 
 				valueField.Set(reflect.ValueOf(parsedTime))
@@ -296,7 +374,12 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 				parseDuration, err := parseHHMMSS(value)
 
 				if err != nil {
-					return nil, fmt.Errorf("Cannot Convert value '%v' of column %s to time.Duration.", value, columnName)
+					return Result[T]{
+						Error: &FileError{
+							Code:    "parse_error",
+							Message: fmt.Sprintf("Não foi possivel converter o valor '%v' da coluna '%s' para um time.Duration.", value, columnName),
+						},
+					}
 				}
 
 				valueField.Set(reflect.ValueOf(parseDuration))
@@ -317,7 +400,12 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 				valueInt, err := strconv.ParseInt(value, 10, bitSize(valueField))
 
 				if err != nil {
-					return nil, fmt.Errorf("Cannot Convert value '%v' of column %s to int.", value, columnName)
+					return Result[T]{
+						Error: &FileError{
+							Code:    "parse_error",
+							Message: fmt.Sprintf("Não foi possivel converter o valor '%v' da coluna '%s' para um int.", value, columnName),
+						},
+					}
 				}
 
 				valueField.SetInt(valueInt)
@@ -331,7 +419,12 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 				valueFloat, err := strconv.ParseFloat(value, bitSize(valueField))
 
 				if err != nil {
-					return nil, fmt.Errorf("Cannot Convert value '%v' of column %s to float.", value, columnName)
+					return Result[T]{
+						Error: &FileError{
+							Code:    "parse_error",
+							Message: fmt.Sprintf("Não foi possivel converter o valor '%v' da coluna '%s' para um float.", value, columnName),
+						},
+					}
 				}
 
 				valueField.SetFloat(valueFloat)
@@ -345,7 +438,12 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 				valueUint, err := strconv.ParseUint(value, 10, bitSize(valueField))
 
 				if err != nil {
-					return nil, fmt.Errorf("Cannot Convert value '%v' of column %s to uint.", value, columnName)
+					return Result[T]{
+						Error: &FileError{
+							Code:    "parse_error",
+							Message: fmt.Sprintf("Não foi possivel converter o valor '%v' da coluna '%s' para um uint.", value, columnName),
+						},
+					}
 				}
 
 				valueField.SetUint(valueUint)
@@ -359,7 +457,12 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 				valueBool, err := strconv.ParseBool(value)
 
 				if err != nil {
-					return nil, fmt.Errorf("Cannot Convert value '%v' of column %s to bool.", value, columnName)
+					return Result[T]{
+						Error: &FileError{
+							Code:    "parse_error",
+							Message: fmt.Sprintf("Não foi possivel converter o valor '%v' da coluna '%s' para um bool.", value, columnName),
+						},
+					}
 				}
 
 				valueField.SetBool(valueBool)
@@ -378,7 +481,12 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 					valueFloat, _, err := big.ParseFloat(value, 10, precision*4, big.RoundingMode(big.Exact))
 
 					if err != nil {
-						return nil, fmt.Errorf("Cannot Convert value '%v' of column %s to uint.", value, columnName)
+						return Result[T]{
+							Error: &FileError{
+								Code:    "parse_error",
+								Message: fmt.Sprintf("Não foi possivel converter o valor '%v' da coluna '%s' para um BigFloat.", value, columnName),
+							},
+						}
 					}
 
 					valueField.Set(reflect.ValueOf(valueFloat))
@@ -388,13 +496,21 @@ func loadStruct[T any](values [][]string) ([]T, error) {
 		}
 
 		if len(notFoundColumns) != 0 {
-			return nil, fmt.Errorf("Columns %v not found on the provided file.", notFoundColumns)
+			return Result[T]{
+				Error: &FileError{
+					Code:    "parse_error",
+					Message: fmt.Sprintf("As colunas %v não foram encontradas no ficheiro selecionado.", notFoundColumns),
+				},
+			}
 		}
 
 		result = append(result, item)
 	}
 
-	return result, nil
+	return Result[T]{
+		Success: true,
+		Data:    result,
+	}
 }
 
 func bitSize(reflectValue reflect.Value) int {
@@ -457,22 +573,12 @@ func parseHHMMSS(input string) (time.Duration, error) {
 		time.Duration(s)*time.Second, nil
 }
 
-func formatHHMMSS(d time.Duration) string {
-	totalSeconds := int64(d.Seconds())
-
-	hours := totalSeconds / 3600
-	minutes := (totalSeconds % 3600) / 60
-	seconds := totalSeconds % 60
-
-	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
-}
-
 func durationToExcelTime(d time.Duration) float64 {
 	return float64(d) / float64(24*time.Hour)
 }
 
 func durationCell(f *excelize.File, d time.Duration) (excelize.Cell, error) {
-	format := "hh:mm:ss" // use "hh:mm:ss" if you never go above 24h
+	format := "hh:mm:ss"
 
 	styleID, err := f.NewStyle(&excelize.Style{
 		CustomNumFmt: &format,
