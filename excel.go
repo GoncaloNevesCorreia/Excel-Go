@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +55,7 @@ func Parse(blob string, filename string) Result[byte] {
 	}
 }
 
-func ReadBytes[T any](data []byte, sheet string) Result[T] {
+func ReadBytes[T any](data []byte, sheets []string) Result[T] {
 	reader := bytes.NewReader(data)
 
 	f, err := excelize.OpenReader(reader)
@@ -74,10 +75,21 @@ func ReadBytes[T any](data []byte, sheet string) Result[T] {
 		}
 	}()
 
-	return readSheet[T](f, sheet)
+	sheetName, err := chooseSheet(f, sheets)
+
+	if err != nil {
+		return Result[T]{
+			Error: &FileError{
+				Code:    "invalid_file",
+				Message: err.Error(),
+			},
+		}
+	}
+
+	return readSheet[T](f, sheetName)
 }
 
-func ReadBook[T any](filePath string, sheet string) Result[T] {
+func ReadBook[T any](filePath string, sheets []string) Result[T] {
 	f, err := excelize.OpenFile(filePath)
 
 	if err != nil {
@@ -95,7 +107,18 @@ func ReadBook[T any](filePath string, sheet string) Result[T] {
 		}
 	}()
 
-	return readSheet[T](f, sheet)
+	sheetName, err := chooseSheet(f, sheets)
+
+	if err != nil {
+		return Result[T]{
+			Error: &FileError{
+				Code:    "invalid_file",
+				Message: err.Error(),
+			},
+		}
+	}
+
+	return readSheet[T](f, sheetName)
 }
 
 func WriteBook[T any](file string, sheet string, items []T) Result[T] {
@@ -161,6 +184,18 @@ func readSheet[T any](f *excelize.File, sheet string) Result[T] {
 	}
 
 	return loadStruct[T](rows)
+}
+
+func chooseSheet(f *excelize.File, sheets []string) (string, error) {
+	fileSheets := f.GetSheetList()
+
+	for _, name := range sheets {
+		if slices.Contains(fileSheets, name) {
+			return name, nil
+		}
+	}
+
+	return "", fmt.Errorf("O documento necessita de ter uma das seguintes folhas: %v", sheets)
 }
 
 func getColumns[T any]() ([]string, []any) {
@@ -303,13 +338,13 @@ func loadStruct[T any](values [][]string) Result[T] {
 	headerIndex := make(map[string]int)
 
 	for i, header := range headers {
-		trimedHeader := strings.TrimSpace(header)
+		trimedHeader := strings.ToLower(strings.TrimSpace(header))
 
 		if trimedHeader == "" {
 			continue
 		}
 
-		headerIndex[strings.TrimSpace(header)] = i
+		headerIndex[trimedHeader] = i
 	}
 
 	result := make([]T, 0, len(values)-1)
@@ -331,15 +366,22 @@ func loadStruct[T any](values [][]string) Result[T] {
 			}
 
 			jsonTag := structField.Tag.Get("json")
-			columnName, _, _ := strings.Cut(jsonTag, ",")
+			columnName, extra, _ := strings.Cut(jsonTag, ",")
+
+			isOptional := extra == "omitempty"
 
 			if columnName == "" {
 				continue
 			}
 
-			columnIndex, exists := headerIndex[columnName]
+			columnIndex, exists := headerIndex[strings.ToLower(columnName)]
 
 			if !exists {
+				if isOptional {
+					valueField.SetZero()
+					continue
+				}
+
 				notFoundColumns = append(notFoundColumns, columnName)
 				continue
 			}
@@ -351,6 +393,14 @@ func loadStruct[T any](values [][]string) Result[T] {
 			value := row[columnIndex]
 
 			valueType := valueField.Type()
+
+			if valueType.Kind() == reflect.Pointer {
+				valueType = valueType.Elem()
+
+				valueField.Set(reflect.New(valueField.Type().Elem()))
+
+				valueField = valueField.Elem()
+			}
 
 			// TODO: Adicionar converção automatica de strings no excel para:
 			// DD/MM/YYYY or DD/MM/YYYY hh:mm:ss
@@ -531,9 +581,10 @@ func isTime(t reflect.Type) bool {
 }
 
 func isDuration(t reflect.Type) bool {
+	tTimeDurationPtr := reflect.TypeFor[*time.Duration]()
 	tTimeDuration := reflect.TypeFor[time.Duration]()
 
-	return t == tTimeDuration
+	return t == tTimeDuration || t == tTimeDurationPtr
 }
 
 func parseHHMMSS(input string) (time.Duration, error) {
